@@ -1,13 +1,19 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { BlurView } from "expo-blur";
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AccessibilityInfo,
+  ActivityIndicator,
+  FlatList,
+  Image,
+  Modal,
   PanResponder,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -26,6 +32,111 @@ interface CalcButton {
   type: "number" | "operation" | "function" | "equals";
 }
 
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+const AnimatedView = Animated.createAnimatedComponent(View);
+
+// Glassmorphic Flakes Component - Creates frosted glass effect
+interface Flake {
+  id: string;
+  left: number;
+  top: number;
+  size: number;
+  opacity: number;
+  delay: number;
+}
+
+const generateFlakes = (count: number = 6): Flake[] => {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `flake-${i}`,
+    left: Math.random() * 100,
+    top: Math.random() * 100,
+    size: Math.random() * 30 + 10,
+    opacity: Math.random() * 0.2 + 0.1,
+    delay: i * 100,
+  }));
+};
+
+const GlassmorphicFlakes = ({
+  flakes,
+  isVisible,
+}: {
+  flakes: Flake[];
+  isVisible: boolean;
+}) => {
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      {flakes.map((flake) => (
+        <AnimatedView
+          key={flake.id}
+          style={[
+            styles.flake,
+            {
+              left: `${flake.left}%`,
+              top: `${flake.top}%`,
+              width: flake.size,
+              height: flake.size,
+              opacity: isVisible ? flake.opacity : 0,
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+};
+
+const CalculatorButton = ({
+  btn,
+  onPress,
+}: {
+  btn: CalcButton;
+  onPress: (btn: CalcButton) => void;
+}) => {
+  const scale = useSharedValue(1);
+
+  const animatedButtonStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePressIn = () => {
+    // High-stiffness spring for immediate tactile feedback
+    scale.value = withSpring(0.9, { damping: 15, stiffness: 648 });
+  };
+
+  const handlePressOut = () => {
+    // Bouncy return to normal state
+    scale.value = withSpring(1, { damping: 12, stiffness: 324 });
+  };
+
+  return (
+    <AnimatedPressable
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      onPress={() => onPress(btn)}
+      style={[
+        styles.button,
+        btn.type === "operation" || btn.type === "equals"
+          ? styles.opButton
+          : btn.type === "function"
+            ? styles.funcButton
+            : styles.numButton,
+        animatedButtonStyle,
+        btn.label === "0" && { flex: 2.2, aspectRatio: undefined },
+      ]}
+    >
+      <Text
+        style={[
+          styles.buttonText,
+          btn.type === "number" && styles.numberText,
+          (btn.type === "operation" || btn.type === "equals") &&
+            styles.whiteText,
+        ]}
+      >
+        {btn.label}
+      </Text>
+    </AnimatedPressable>
+  );
+};
+
 export default function Index() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -35,14 +146,43 @@ export default function Index() {
   const [future, setFuture] = useState<string[]>([]);
   const scrollViewRef = useRef<ScrollView>(null);
   const swipeValue = useSharedValue(0);
+  const sideSwipeValue = useSharedValue(width);
   const isOverlayOpen = useRef(false);
+  const isSideOverlayOpen = useRef(false);
 
-  const wifiScale = useSharedValue(1);
+  // Accessibility & Glassmorphism
+  const [reduceTransparency, setReduceTransparency] = useState(false);
+  const [mainFlakes] = useState(() => generateFlakes(6));
+  const [sideFlakes] = useState(() => generateFlakes(5));
+  const [bluetoothFlakes] = useState(() => generateFlakes(4));
+
+  useEffect(() => {
+    // Check if user has reduce transparency enabled for accessibility (native only)
+    if (Platform.OS === "ios" || Platform.OS === "android") {
+      try {
+        AccessibilityInfo.isReduceTransparencyEnabled?.()
+          .then((enabled) => setReduceTransparency(enabled))
+          .catch(() => setReduceTransparency(false));
+      } catch {
+        setReduceTransparency(false);
+      }
+    }
+  }, []);
+
+  const [hapticEnabled, setHapticEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [darkModeEnabled, setDarkModeEnabled] = useState(true);
+  const [saveHistoryEnabled, setSaveHistoryEnabled] = useState(true);
+
+  // Connection States
+  const [isBTModalVisible, setIsBTModalVisible] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [btDevices, setBtDevices] = useState<{ id: string; name: string }[]>(
+    [],
+  );
+  const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
+
   const bluetoothScale = useSharedValue(1);
-
-  const animatedWifiStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: wifiScale.value }],
-  }));
 
   const animatedBluetoothStyle = useAnimatedStyle(() => ({
     transform: [{ scale: bluetoothScale.value }],
@@ -82,6 +222,10 @@ export default function Index() {
     ],
   }));
 
+  const animatedSideModalStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: sideSwipeValue.value }],
+  }));
+
   // Safe live result calculation, now using the display state directly
   const getLiveResult = () => {
     try {
@@ -102,34 +246,106 @@ export default function Index() {
     }
   };
 
+  // Parse expression into individual items with quantities
+  const parseCalculationBreakdown = () => {
+    try {
+      // Replace symbols with standard operators for splitting
+      const normalized = display
+        .replace(/×/g, "*")
+        .replace(/−/g, "+")
+        .replace(/÷/g, "/");
+
+      // Split by + but preserve the terms
+      const terms = normalized.split("+").filter((term) => term.trim());
+
+      return terms.map((term) => {
+        const trimmedTerm = term.trim();
+        if (trimmedTerm.includes("*")) {
+          // Has explicit quantity
+          const [item, quantity] = trimmedTerm.split("*");
+          return {
+            display: `${item}*${quantity}`,
+            quantity: parseInt(quantity) || 1,
+          };
+        } else if (trimmedTerm.includes("/")) {
+          // Division should be shown as is
+          return {
+            display: trimmedTerm,
+            quantity: 1,
+          };
+        } else {
+          // Just a number, treat as quantity 1
+          return {
+            display: trimmedTerm,
+            quantity: 1,
+          };
+        }
+      });
+    } catch {
+      return [];
+    }
+  };
+
+  const gestureType = useRef<"vertical" | "side" | null>(null);
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (_, gestureState) => {
+        // Detect if swiping from the right edge (within 50px of width)
+        if (gestureState.x0 > width - 50) {
+          gestureType.current = "side";
+        } else {
+          gestureType.current = "vertical";
+        }
+      },
       onPanResponderMove: (_, gestureState) => {
-        // Calculate new position based on whether we are already open
-        const startPos = isOverlayOpen.current ? -height : 0;
-        const nextValue = startPos + gestureState.dy;
-
-        // Clamp: can't pull down past closed, or up past open
-        if (nextValue <= 0 && nextValue >= -height) {
-          swipeValue.value = nextValue;
+        if (gestureType.current === "side") {
+          const startPos = isSideOverlayOpen.current ? 0 : width;
+          const nextValue = Math.max(
+            0,
+            Math.min(width, startPos + gestureState.dx),
+          );
+          sideSwipeValue.value = nextValue;
+        } else {
+          // Vertical logic for Advanced Options
+          const startPos = isOverlayOpen.current ? -height : 0;
+          const nextValue = startPos + gestureState.dy;
+          if (nextValue <= 0 && nextValue >= -height) {
+            swipeValue.value = nextValue;
+          }
         }
       },
       onPanResponderRelease: (_, gestureState) => {
-        const threshold = isOverlayOpen.current
-          ? -height + height * 0.06
-          : -height * 0.06;
+        if (gestureType.current === "side") {
+          const threshold = isSideOverlayOpen.current
+            ? width * 0.06
+            : width - width * 0.06;
 
-        if (swipeValue.value < threshold) {
-          // Snap to Open
-          swipeValue.value = withTiming(-height, { duration: 300 });
-          isOverlayOpen.current = true;
+          if (sideSwipeValue.value < threshold) {
+            // Snap to Open (Left)
+            sideSwipeValue.value = withTiming(0, { duration: 300 });
+            isSideOverlayOpen.current = true;
+          } else {
+            // Snap to Closed (Right)
+            sideSwipeValue.value = withTiming(width, { duration: 300 });
+            isSideOverlayOpen.current = false;
+          }
         } else {
-          // Snap to Closed
-          swipeValue.value = withTiming(0, { duration: 300 });
-          isOverlayOpen.current = false;
+          const threshold = isOverlayOpen.current
+            ? -height + height * 0.06
+            : -height * 0.06;
+
+          if (swipeValue.value < threshold) {
+            swipeValue.value = withTiming(-height, { duration: 300 });
+            isOverlayOpen.current = true;
+          } else {
+            swipeValue.value = withTiming(0, { duration: 300 });
+            isOverlayOpen.current = false;
+          }
         }
+        gestureType.current = null;
       },
     }),
   ).current;
@@ -295,8 +511,53 @@ export default function Index() {
     },
     [display, waitingForNewValue, pushToHistory],
   );
+
+  // Mock Scanning Logic (Requires native libraries for real use)
+  const startBTScan = async () => {
+    setIsBTModalVisible(true);
+    setIsScanning(true);
+    // Placeholder: Integration with react-native-ble-plx would go here
+    setTimeout(() => {
+      setBtDevices([
+        { id: "A1", name: "Thermal Printer 58mm" },
+        { id: "B2", name: "HP Laser Jet" },
+        { id: "C3", name: "Bluetooth Printer" },
+      ]);
+      setIsScanning(false);
+    }, 1500);
+  };
+
+  const handleConnectBT = (id: string, name: string) => {
+    setConnectedDevice(name);
+    setIsBTModalVisible(false);
+    alert(`Connected to ${name}`);
+  };
+
+  const printResult = () => {
+    if (!connectedDevice) {
+      alert("Please connect a Bluetooth printer first.");
+      startBTScan();
+      return;
+    }
+
+    // ESC/POS Command structure (Conceptual)
+    // [0x1B, 0x40] -> Initialize
+    // [0x1B, 0x61, 0x01] -> Center align
+    const escPosCommand = `
+      INITIALIZE
+      CENTER_ALIGN
+      TEXT: "iCalc Receipt"
+      FEED_2_LINES
+      TEXT: "Result: ${display}"
+      FEED_4_LINES
+      PAPER_CUT
+    `;
+    console.log("Sending ESC/POS to printer:", escPosCommand);
+    alert("Printing...");
+  };
+
   return (
-    <View style={styles.container}>
+    <View style={styles.container} {...panResponder.panHandlers}>
       <View
         style={[styles.mainWrapper, isLandscape && styles.landscapeWrapper]}
       >
@@ -325,15 +586,6 @@ export default function Index() {
           ]}
         >
           <View style={styles.topQuickActions}>
-            <Pressable onPress={() => handleIconBounce(wifiScale)}>
-              <Animated.Image
-                source={require("../../assets/on-icons/wifi-on.png")}
-                style={[
-                  { width: 22, height: 22, resizeMode: "contain" },
-                  animatedWifiStyle,
-                ]}
-              />
-            </Pressable>
             <View style={styles.searchBar}>
               <MaterialCommunityIcons
                 name="magnify"
@@ -345,7 +597,10 @@ export default function Index() {
             </View>
             <Pressable
               style={styles.bluetoothButton}
-              onPress={() => handleIconBounce(bluetoothScale)}
+              onPress={() => {
+                handleIconBounce(bluetoothScale);
+                startBTScan();
+              }}
             >
               <Animated.Image
                 source={require("../../assets/on-icons/buetooth-on.png")}
@@ -409,6 +664,9 @@ export default function Index() {
                 style={future.length === 0 && styles.disabledText}
               />
             </Pressable>
+            <Pressable onPress={printResult} style={styles.actionBtn}>
+              <MaterialCommunityIcons name="printer" size={15} color="#bbb" />
+            </Pressable>
             <Pressable onPress={handleBackspace} style={styles.actionBtn}>
               <MaterialCommunityIcons
                 name="backspace-outline"
@@ -429,34 +687,11 @@ export default function Index() {
                 style={[styles.row, isLandscape && styles.rowLandscape]}
               >
                 {row.map((btn: CalcButton) => (
-                  <Pressable
+                  <CalculatorButton
                     key={btn.label}
-                    onPress={() => handlePress(btn)}
-                    style={({ pressed }) => [
-                      styles.button,
-                      btn.type === "operation" || btn.type === "equals"
-                        ? styles.opButton
-                        : btn.type === "function"
-                          ? styles.funcButton
-                          : styles.numButton,
-                      pressed && styles.buttonPressed,
-                      btn.label === "0" && {
-                        flex: 2.2,
-                        aspectRatio: undefined,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.buttonText,
-                        btn.type === "number" && styles.numberText,
-                        (btn.type === "operation" || btn.type === "equals") &&
-                          styles.whiteText,
-                      ]}
-                    >
-                      {btn.label}
-                    </Text>
-                  </Pressable>
+                    btn={btn}
+                    onPress={handlePress}
+                  />
                 ))}
               </View>
             ))}
@@ -499,7 +734,7 @@ export default function Index() {
         <BlurView intensity={70} tint="light" style={StyleSheet.absoluteFill} />
       </Animated.View>
 
-      {/* Advanced Options panel implemented as a fluid overlay */}
+      {/* Advanced Options panel implemented as a fluid overlay with glassmorphism */}
       <Animated.View
         style={[
           StyleSheet.absoluteFill,
@@ -509,18 +744,61 @@ export default function Index() {
         pointerEvents="box-none"
       >
         <View style={styles.modalOverlay} pointerEvents="box-none">
-          <View style={styles.modalView}>
+          <View
+            style={[
+              styles.modalView,
+              reduceTransparency && { backgroundColor: "#2a2a2a" },
+            ]}
+          >
+            <GlassmorphicFlakes
+              flakes={mainFlakes}
+              isVisible={isOverlayOpen.current}
+            />
+            {!reduceTransparency && (
+              <BlurView
+                intensity={80}
+                tint="dark"
+                style={StyleSheet.absoluteFill}
+              />
+            )}
             <View
               {...panResponder.panHandlers}
               style={styles.modalHandleContainer}
             >
               <View style={styles.modalHandle} />
             </View>
-            <Text style={styles.modalTitle}>Advanced Options</Text>
+            <View style={styles.modalHeader}>
+              <Image
+                source={require("../../assets/images/icalc-logo.png")}
+                style={styles.modalLogo}
+              />
+              <TextInput
+                style={[
+                  styles.modalTitle,
+                  { flex: 1, marginLeft: 12, marginBottom: 0 },
+                ]}
+                placeholder="name here"
+                placeholderTextColor="#aaa"
+              />
+            </View>
             <View style={styles.modalBody}>
-              <Text style={styles.modalDescription}>
-                Calculator history and configuration settings would appear here.
-              </Text>
+              {parseCalculationBreakdown().length > 0 ? (
+                <ScrollView style={styles.breakdownList}>
+                  <Text style={styles.breakdownLabel}>Grocery List:</Text>
+                  {parseCalculationBreakdown().map((item, index) => (
+                    <View key={index} style={styles.breakdownItem}>
+                      <Text style={styles.breakdownItemText}>
+                        /{item.display}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : (
+                <Text style={styles.modalDescription}>
+                  Enter a calculation to see the grocery list here. Use * to
+                  specify quantities (e.g., 34*3+67)
+                </Text>
+              )}
             </View>
             <Pressable
               style={styles.closeButton}
@@ -534,6 +812,213 @@ export default function Index() {
           </View>
         </View>
       </Animated.View>
+
+      {/* Side Settings/History panel triggered by right-edge swipe with glassmorphism */}
+      <Animated.View
+        style={[
+          StyleSheet.absoluteFill,
+          styles.sideOverlayContainer,
+          animatedSideModalStyle,
+        ]}
+        pointerEvents="box-none"
+      >
+        {!reduceTransparency && (
+          <BlurView
+            intensity={90}
+            tint="dark"
+            style={StyleSheet.absoluteFill}
+          />
+        )}
+        <View
+          style={[
+            styles.sideModalView,
+            reduceTransparency && { backgroundColor: "#1a1a1a" },
+          ]}
+        >
+          <GlassmorphicFlakes
+            flakes={sideFlakes}
+            isVisible={isSideOverlayOpen.current}
+          />
+          <View style={styles.sideModalHeader}>
+            <View style={styles.headerLeft}>
+              <Image
+                source={require("../../assets/images/icalc-logo.png")}
+                style={styles.sideModalLogo}
+              />
+              <Text style={styles.sideModalTitle}>iCalc Settings</Text>
+            </View>
+            <Pressable
+              onPress={() => {
+                sideSwipeValue.value = withTiming(width, { duration: 300 });
+                isSideOverlayOpen.current = false;
+              }}
+            >
+              <MaterialCommunityIcons name="close" size={24} color="white" />
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={styles.sideModalContent}>
+            <Pressable
+              style={styles.settingItem}
+              onPress={() => setHapticEnabled(!hapticEnabled)}
+            >
+              <View style={styles.settingInfo}>
+                <MaterialCommunityIcons
+                  name="vibrate"
+                  size={20}
+                  color="#208AEF"
+                />
+                <Text style={styles.settingText}>Haptic Feedback</Text>
+              </View>
+              <MaterialCommunityIcons
+                name={hapticEnabled ? "toggle-switch" : "toggle-switch-off"}
+                size={32}
+                color={hapticEnabled ? "#208AEF" : "#666"}
+              />
+            </Pressable>
+
+            <Pressable
+              style={styles.settingItem}
+              onPress={() => setSoundEnabled(!soundEnabled)}
+            >
+              <View style={styles.settingInfo}>
+                <MaterialCommunityIcons
+                  name="volume-high"
+                  size={20}
+                  color="#208AEF"
+                />
+                <Text style={styles.settingText}>Sound Effects</Text>
+              </View>
+              <MaterialCommunityIcons
+                name={soundEnabled ? "toggle-switch" : "toggle-switch-off"}
+                size={32}
+                color={soundEnabled ? "#208AEF" : "#666"}
+              />
+            </Pressable>
+
+            <Pressable
+              style={styles.settingItem}
+              onPress={() => setDarkModeEnabled(!darkModeEnabled)}
+            >
+              <View style={styles.settingInfo}>
+                <MaterialCommunityIcons
+                  name="theme-light-dark"
+                  size={20}
+                  color="#208AEF"
+                />
+                <Text style={styles.settingText}>Dark Mode</Text>
+              </View>
+              <MaterialCommunityIcons
+                name={darkModeEnabled ? "toggle-switch" : "toggle-switch-off"}
+                size={32}
+                color={darkModeEnabled ? "#208AEF" : "#666"}
+              />
+            </Pressable>
+
+            <Pressable
+              style={styles.settingItem}
+              onPress={() => setSaveHistoryEnabled(!saveHistoryEnabled)}
+            >
+              <View style={styles.settingInfo}>
+                <MaterialCommunityIcons
+                  name="history"
+                  size={20}
+                  color="#208AEF"
+                />
+                <Text style={styles.settingText}>Save History</Text>
+              </View>
+              <MaterialCommunityIcons
+                name={
+                  saveHistoryEnabled ? "toggle-switch" : "toggle-switch-off"
+                }
+                size={32}
+                color={saveHistoryEnabled ? "#208AEF" : "#666"}
+              />
+            </Pressable>
+
+            <Pressable
+              style={styles.dangerButton}
+              onPress={() => {
+                setPast([]);
+                setFuture([]);
+                setDisplay("0");
+              }}
+            >
+              <Text style={styles.dangerButtonText}>Clear All Data</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </Animated.View>
+
+      {/* Bluetooth Discovery Modal with Glassmorphism */}
+      <Modal visible={isBTModalVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View
+            style={[
+              styles.modalView,
+              { height: "50%" },
+              reduceTransparency && { backgroundColor: "#2a2a2a" },
+            ]}
+          >
+            <GlassmorphicFlakes
+              flakes={bluetoothFlakes}
+              isVisible={isBTModalVisible}
+            />
+            {!reduceTransparency && (
+              <BlurView
+                intensity={85}
+                tint="dark"
+                style={StyleSheet.absoluteFill}
+              />
+            )}
+            <View style={styles.modalHeader}>
+              <Image
+                source={require("../../assets/images/icalc-logo.png")}
+                style={styles.modalLogo}
+              />
+              <Text
+                style={[styles.modalTitle, { marginLeft: 12, marginBottom: 0 }]}
+              >
+                Bluetooth Printers
+              </Text>
+            </View>
+            {isScanning ? (
+              <ActivityIndicator size="large" color="#208AEF" />
+            ) : (
+              <FlatList
+                data={btDevices}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => (
+                  <Pressable
+                    style={styles.connectionItem}
+                    onPress={() => handleConnectBT(item.id, item.name)}
+                  >
+                    <MaterialCommunityIcons
+                      name="printer"
+                      size={20}
+                      color="black"
+                    />
+                    <Text style={styles.connectionText}>{item.name}</Text>
+                    {connectedDevice === item.name && (
+                      <MaterialCommunityIcons
+                        name="check"
+                        size={20}
+                        color="green"
+                      />
+                    )}
+                  </Pressable>
+                )}
+                style={{ width: "100%" }}
+              />
+            )}
+            <Pressable
+              style={[styles.closeButton, { marginTop: 20 }]}
+              onPress={() => setIsBTModalVisible(false)}
+            >
+              <Text style={styles.closeButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -568,7 +1053,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   card: {
-    backgroundColor: "white",
+    backgroundColor: "rgba(255, 255, 255, 0.65)",
     width: "100%",
     maxWidth: "92%",
     maxHeight: "95%",
@@ -595,10 +1080,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   liveResultText: {
-    fontSize: 32,
+    fontSize: 40,
     color: "#141414",
     fontWeight: "bold",
     fontFamily: "Glacial Indifference",
+    marginBottom: 19,
   },
   calculationArea: {
     flex: 1,
@@ -623,20 +1109,34 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   modalView: {
-    backgroundColor: "#fdf6e3",
+    backgroundColor: Platform.select({
+      ios: "rgba(50, 50, 50, 0.3)",
+      android: "rgba(50, 50, 50, 0.7)",
+      default: "rgba(50, 50, 50, 0.3)",
+    }),
     borderRadius: 18,
     padding: 24,
     marginBottom: 3,
     alignItems: "center",
     height: "80%",
+    borderWidth: Platform.select({ android: 1, default: 0 }),
+    borderColor: Platform.select({
+      android: "rgba(255, 255, 255, 0.2)",
+      default: "transparent",
+    }),
+    overflow: "hidden",
     boxShadow: [
       {
         offsetX: 0,
         offsetY: -4,
-        blurRadius: 10,
+        blurRadius: 16,
         color: "rgba(0, 0, 0, 0.1)",
       },
     ],
+    ...Platform.select({
+      android: { elevation: 8 },
+      default: {},
+    }),
   },
   modalHandle: {
     width: 80,
@@ -656,6 +1156,26 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     fontFamily: "Glacial Indifference",
     marginBottom: 16,
+    color: "#ffffff",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    marginBottom: 12,
+  },
+  modalLogo: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    boxShadow: [
+      {
+        offsetX: 0,
+        offsetY: 2,
+        blurRadius: 6,
+        color: "rgba(0, 0, 0, 0.15)",
+      },
+    ],
   },
   modalBody: {
     flex: 1,
@@ -663,9 +1183,36 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   modalDescription: {
-    color: "#181313",
+    color: "#f0f0f0",
     textAlign: "center",
     fontFamily: "Glacial Indifference",
+  },
+  breakdownList: {
+    width: "100%",
+    maxHeight: 300,
+  },
+  breakdownLabel: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#ffffff",
+    fontFamily: "Glacial Indifference",
+    marginBottom: 12,
+    textAlign: "left",
+  },
+  breakdownItem: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginVertical: 6,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    borderLeftWidth: 4,
+    borderLeftColor: "#e7359d",
+    borderRadius: 4,
+  },
+  breakdownItemText: {
+    fontSize: 16,
+    color: "#f0f0f0",
+    fontFamily: "Glacial Indifference",
+    fontWeight: "500",
   },
   closeButton: {
     backgroundColor: "black",
@@ -725,7 +1272,7 @@ const styles = StyleSheet.create({
   searchBar: {
     flex: 1,
     flexDirection: "row",
-    backgroundColor: "#fdf6e3",
+    backgroundColor: "#ffffff",
     borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -819,7 +1366,7 @@ const styles = StyleSheet.create({
   },
 
   numButton: {
-    backgroundColor: "#ffffff",
+    backgroundColor: "#ffffffbd",
   },
   opButton: {
     backgroundColor: "black",
@@ -854,5 +1401,114 @@ const styles = StyleSheet.create({
   },
   historyTextLandscape: {
     fontFamily: "Glacial Indifference",
+  },
+  sideOverlayContainer: {
+    zIndex: 20,
+    flexDirection: "row",
+    justifyContent: "flex-end",
+  },
+  sideModalView: {
+    width: "80%",
+    height: "100%",
+    backgroundColor: Platform.select({
+      ios: "rgba(25, 25, 25, 0.4)",
+      android: "rgba(25, 25, 25, 0.85)",
+      default: "rgba(25, 25, 25, 0.4)",
+    }),
+    padding: 20,
+    paddingTop: 60,
+    borderLeftWidth: Platform.select({ android: 1, default: 0 }),
+    borderLeftColor: Platform.select({
+      android: "rgba(255, 255, 255, 0.15)",
+      default: "transparent",
+    }),
+    overflow: "hidden",
+    ...Platform.select({
+      android: { elevation: 12 },
+      default: {},
+    }),
+  },
+  sideModalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 40,
+  },
+  headerLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  sideModalLogo: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    boxShadow: [
+      {
+        offsetX: 0,
+        offsetY: 2,
+        blurRadius: 6,
+        color: "rgba(0, 0, 0, 0.3)",
+      },
+    ],
+  },
+  sideModalTitle: {
+    color: "white",
+    fontSize: 22,
+    fontFamily: "Glacial Indifference",
+    fontWeight: "bold",
+  },
+  sideModalContent: {
+    gap: 15,
+  },
+  settingItem: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#333",
+  },
+  settingInfo: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  settingText: {
+    color: "#eee",
+    fontSize: 16,
+    fontFamily: "Glacial Indifference",
+  },
+  dangerButton: {
+    marginTop: 30,
+    padding: 15,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 59, 48, 0.1)",
+    alignItems: "center",
+  },
+  dangerButtonText: {
+    color: "#ff3b30",
+    fontSize: 16,
+    fontWeight: "600",
+    fontFamily: "Glacial Indifference",
+  },
+  connectionItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+    width: "100%",
+  },
+  connectionText: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 16,
+    fontFamily: "Glacial Indifference",
+  },
+  flake: {
+    position: "absolute",
+    borderRadius: 999,
+    backgroundColor: "rgba(255, 255, 255, 0.8)",
   },
 });
