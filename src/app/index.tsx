@@ -1053,7 +1053,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   card: {
-    backgroundColor: "rgba(255, 255, 255, 0.65)",
+    backgroundColor: "rgba(255, 255, 255, 0.81)",
     width: "100%",
     maxWidth: "92%",
     maxHeight: "95%",
@@ -1366,7 +1366,7 @@ const styles = StyleSheet.create({
   },
 
   numButton: {
-    backgroundColor: "#ffffffbd",
+    backgroundColor: "#ffffff",
   },
   opButton: {
     backgroundColor: "black",
