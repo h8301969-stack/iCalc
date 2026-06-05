@@ -1,6 +1,7 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { BlurView } from "expo-blur";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import Constants, { ExecutionEnvironment } from "expo-constants";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -8,15 +9,16 @@ import {
   Image,
   Modal,
   PanResponder,
+  PermissionsAndroid,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   useWindowDimensions,
   View,
 } from "react-native";
+import { BleManager } from "react-native-ble-plx";
 import Animated, {
   Extrapolation,
   interpolate,
@@ -64,7 +66,7 @@ const GlassmorphicFlakes = ({
   isVisible: boolean;
 }) => {
   return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+    <View style={[StyleSheet.absoluteFill, { pointerEvents: "none" }]}>
       {flakes.map((flake) => (
         <AnimatedView
           key={flake.id}
@@ -99,12 +101,12 @@ const CalculatorButton = ({
 
   const handlePressIn = () => {
     // High-stiffness spring for immediate tactile feedback
-    scale.value = withSpring(0.9, { damping: 15, stiffness: 648 });
+    scale.value = withSpring(0.9, { damping: 22.5, stiffness: 1264 });
   };
 
   const handlePressOut = () => {
     // Bouncy return to normal state
-    scale.value = withSpring(1, { damping: 12, stiffness: 324 });
+    scale.value = withSpring(1, { damping: 18, stiffness: 632 });
   };
 
   return (
@@ -182,6 +184,21 @@ export default function Index() {
   );
   const [connectedDevice, setConnectedDevice] = useState<string | null>(null);
 
+  // Guard initialization for Web and Expo Go
+  const isExpoGo =
+    Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
+  const bleManager = useRef<BleManager | null>(null);
+
+  useEffect(() => {
+    // Only initialize if NOT on web and NOT in Expo Go
+    if (Platform.OS !== "web" && !isExpoGo) {
+      bleManager.current = new BleManager();
+    }
+    return () => {
+      bleManager.current?.destroy();
+    };
+  }, []);
+
   const bluetoothScale = useSharedValue(1);
 
   const animatedBluetoothStyle = useAnimatedStyle(() => ({
@@ -191,9 +208,14 @@ export default function Index() {
   const handleIconBounce = (scale: any) => {
     scale.value = withSequence(
       withTiming(1.2, { duration: 60 }),
-      withSpring(1, { damping: 8, stiffness: 200 }),
+      withSpring(1, { damping: 8, stiffness: 260 }),
     );
   };
+
+  // Helper to convert calculator symbols to JS math operators
+  const sanitizeExpression = useCallback((expr: string) => {
+    return expr.replace(/×/g, "*").replace(/−/g, "-").replace(/÷/g, "/");
+  }, []);
 
   // Main animation mapping: tied to the raw drag value
   const animatedSwipeStyle = useAnimatedStyle(() => ({
@@ -236,10 +258,7 @@ export default function Index() {
       ) {
         return "";
       }
-      const sanitized = display
-        .replace(/×/g, "*")
-        .replace(/−/g, "-")
-        .replace(/÷/g, "/");
+      const sanitized = sanitizeExpression(display);
       return String(new Function(`return ${sanitized}`)());
     } catch {
       return "";
@@ -417,41 +436,6 @@ export default function Index() {
     ],
   ];
 
-  const landscapeOperatorsRow: CalcButton[] = [
-    { label: "÷", type: "operation" },
-    { label: "×", type: "operation" },
-    { label: "−", type: "operation" },
-    { label: "+", type: "operation" },
-  ];
-
-  const landscapeNumbersAndFunctionsGrid: CalcButton[][] = [
-    [
-      { label: "AC", type: "function" },
-      { label: "±", type: "function" },
-      { label: "%", type: "function" },
-    ],
-    [
-      { label: "7", type: "number" },
-      { label: "8", type: "number" },
-      { label: "9", type: "number" },
-    ],
-    [
-      { label: "4", type: "number" },
-      { label: "5", type: "number" },
-      { label: "6", type: "number" },
-    ],
-    [
-      { label: "1", type: "number" },
-      { label: "2", type: "number" },
-      { label: "3", type: "number" },
-    ],
-    [
-      { label: "0", type: "number" },
-      { label: ".", type: "number" },
-      { label: "=", type: "equals" },
-    ],
-  ];
-
   const handlePress = useCallback(
     (btn: CalcButton) => {
       if (btn.type === "number") {
@@ -475,10 +459,7 @@ export default function Index() {
         pushToHistory(nextVal);
       } else if (btn.type === "equals") {
         try {
-          const sanitized = display
-            .replace(/×/g, "*")
-            .replace(/−/g, "-")
-            .replace(/÷/g, "/");
+          const sanitized = sanitizeExpression(display);
           const result = new Function(`return ${sanitized}`)();
           pushToHistory(String(result));
           setWaitingForNewValue(true);
@@ -496,10 +477,7 @@ export default function Index() {
         );
       } else if (btn.label === "%") {
         try {
-          const sanitized = display
-            .replace(/×/g, "*")
-            .replace(/−/g, "-")
-            .replace(/÷/g, "/");
+          const sanitized = sanitizeExpression(display);
           const val = new Function(`return ${sanitized}`)();
           pushToHistory(String(val / 100));
           setWaitingForNewValue(true);
@@ -509,52 +487,179 @@ export default function Index() {
         }
       }
     },
-    [display, waitingForNewValue, pushToHistory],
+    [display, waitingForNewValue, pushToHistory, sanitizeExpression],
   );
 
-  // Mock Scanning Logic (Requires native libraries for real use)
+  const requestPermissions = async () => {
+    if (Platform.OS === "android") {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        {
+          title: "Location Permission",
+          message: "iCalc needs location access to find Bluetooth devices.",
+          buttonNeutral: "Ask Me Later",
+          buttonNegative: "Cancel",
+          buttonPositive: "OK",
+        },
+      );
+      if (granted !== PermissionsAndroid.RESULTS.GRANTED) return false;
+
+      if (Platform.Version >= 31) {
+        const scanGranted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        );
+        const connectGranted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        );
+        if (
+          scanGranted !== PermissionsAndroid.RESULTS.GRANTED ||
+          connectGranted !== PermissionsAndroid.RESULTS.GRANTED
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
+  const isPrinter = (name: string | null) => {
+    if (!name) return false;
+    const printerKeywords = [
+      "printer",
+      "thermal",
+      "mtp",
+      "58mm",
+      "80mm",
+      "pos",
+    ];
+    return printerKeywords.some((keyword) =>
+      name.toLowerCase().includes(keyword),
+    );
+  };
+
   const startBTScan = async () => {
+    if (!bleManager.current) {
+      alert("Bluetooth is not supported on this platform/environment.");
+      return;
+    }
+
+    const hasPermission = await requestPermissions();
+    if (!hasPermission) {
+      alert("Bluetooth permissions denied");
+      return;
+    }
+
     setIsBTModalVisible(true);
     setIsScanning(true);
-    // Placeholder: Integration with react-native-ble-plx would go here
+    setBtDevices([]);
+
+    bleManager.current.startDeviceScan(null, null, (error, device) => {
+      if (error) {
+        console.log("Scan error:", error);
+        setIsScanning(false);
+        return;
+      }
+      // Filtering: Only add devices that look like printers
+      if (device && device.name && isPrinter(device.name)) {
+        setBtDevices((prev) => {
+          if (prev.find((d) => d.id === device.id)) return prev;
+          return [
+            ...prev,
+            { id: device.id, name: device.name || "Unknown Device" },
+          ];
+        });
+      }
+    });
+
+    // Stop scanning after 10 seconds to save battery
     setTimeout(() => {
-      setBtDevices([
-        { id: "A1", name: "Thermal Printer 58mm" },
-        { id: "B2", name: "HP Laser Jet" },
-        { id: "C3", name: "Bluetooth Printer" },
-      ]);
+      bleManager.current?.stopDeviceScan();
       setIsScanning(false);
-    }, 1500);
+    }, 10000);
   };
 
-  const handleConnectBT = (id: string, name: string) => {
-    setConnectedDevice(name);
-    setIsBTModalVisible(false);
-    alert(`Connected to ${name}`);
+  const handleConnectBT = async (id: string, name: string) => {
+    if (!bleManager.current) return;
+    try {
+      setIsScanning(true);
+      bleManager.current.stopDeviceScan();
+      const device = await bleManager.current.connectToDevice(id);
+      await device.discoverAllServicesAndCharacteristics();
+      setConnectedDevice(name);
+      setIsBTModalVisible(false);
+      alert(`Connected to ${name}`);
+    } catch (e) {
+      console.error("Connection error", e);
+      alert("Failed to connect to device.");
+    } finally {
+      setIsScanning(false);
+    }
   };
 
-  const printResult = () => {
-    if (!connectedDevice) {
+  // Helper to convert Uint8Array to Base64 for BLE writing
+  const toBase64 = (uint8: Uint8Array) => {
+    let bin = "";
+    uint8.forEach((byte) => (bin += String.fromCharCode(byte)));
+    return btoa(bin);
+  };
+
+  const printResult = async () => {
+    if (!connectedDevice || !bleManager.current) {
       alert("Please connect a Bluetooth printer first.");
       startBTScan();
       return;
     }
 
-    // ESC/POS Command structure (Conceptual)
-    // [0x1B, 0x40] -> Initialize
-    // [0x1B, 0x61, 0x01] -> Center align
-    const escPosCommand = `
-      INITIALIZE
-      CENTER_ALIGN
-      TEXT: "iCalc Receipt"
-      FEED_2_LINES
-      TEXT: "Result: ${display}"
-      FEED_4_LINES
-      PAPER_CUT
-    `;
-    console.log("Sending ESC/POS to printer:", escPosCommand);
-    alert("Printing...");
+    try {
+      // Standard ESC/POS commands
+      const init = new Uint8Array([0x1b, 0x40]); // ESC @
+      const center = new Uint8Array([0x1b, 0x61, 0x01]); // ESC a 1
+      const feed = new Uint8Array([0x0a, 0x0a]); // LF LF
+      const text = new TextEncoder().encode(`iCalc Result: ${display}\n`);
+
+      const fullCommand = new Uint8Array([
+        ...init,
+        ...center,
+        ...text,
+        ...feed,
+        0x1d,
+        0x56,
+        0x42,
+        0x00, // Paper cut command
+      ]);
+
+      // Find connected device by name/id (usually cached)
+      const devices = await bleManager.current.connectedDevices([]);
+      const device = devices.find((d) => d.name === connectedDevice);
+
+      if (device) {
+        const services = await device.services();
+        // Most printers use service '18f0' or '49535343-fe7d-4ae5-8fa9-9fafd205e455'
+        // For generic printers, we often look for the first writable characteristic
+        for (const service of services) {
+          const characteristics = await service.characteristics();
+          const writable = characteristics.find(
+            (c) => c.isWritableWithoutResponse || c.isWritableWithResponse,
+          );
+          if (writable) {
+            await device.writeCharacteristicWithResponseForService(
+              service.uuid,
+              writable.uuid,
+              toBase64(fullCommand),
+            );
+            alert("Printing successful!");
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Print Error:", e);
+      alert("Printing failed. Check connection.");
+    }
   };
+
+  // Memoize breakdown to avoid double execution in the render block
+  const breakdownItems = parseCalculationBreakdown();
 
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
@@ -604,10 +709,8 @@ export default function Index() {
             >
               <Animated.Image
                 source={require("../../assets/on-icons/buetooth-on.png")}
-                style={[
-                  { width: 24, height: 24, resizeMode: "contain" },
-                  animatedBluetoothStyle,
-                ]}
+                resizeMode="contain"
+                style={[{ width: 24, height: 24 }, animatedBluetoothStyle]}
               />
             </Pressable>
           </View>
@@ -740,10 +843,10 @@ export default function Index() {
           StyleSheet.absoluteFill,
           styles.overlayContainer,
           animatedModalStyle,
+          { pointerEvents: "box-none" },
         ]}
-        pointerEvents="box-none"
       >
-        <View style={styles.modalOverlay} pointerEvents="box-none">
+        <View style={[styles.modalOverlay, { pointerEvents: "box-none" }]}>
           <View
             style={[
               styles.modalView,
@@ -772,20 +875,17 @@ export default function Index() {
                 source={require("../../assets/images/icalc-logo.png")}
                 style={styles.modalLogo}
               />
-              <TextInput
-                style={[
-                  styles.modalTitle,
-                  { flex: 1, marginLeft: 12, marginBottom: 0 },
-                ]}
-                placeholder="name here"
-                placeholderTextColor="#aaa"
-              />
+              <Text style={styles.glowTitle}>
+                <Text style={styles.visionText}>Vision </Text>
+                <Text style={styles.iCalcText}>iCalc </Text>
+                <Text style={styles.logoNumberText}>26</Text>
+              </Text>
             </View>
             <View style={styles.modalBody}>
-              {parseCalculationBreakdown().length > 0 ? (
+              {breakdownItems.length > 0 ? (
                 <ScrollView style={styles.breakdownList}>
                   <Text style={styles.breakdownLabel}>Grocery List:</Text>
-                  {parseCalculationBreakdown().map((item, index) => (
+                  {breakdownItems.map((item, index) => (
                     <View key={index} style={styles.breakdownItem}>
                       <Text style={styles.breakdownItemText}>
                         /{item.display}
@@ -803,7 +903,9 @@ export default function Index() {
             <Pressable
               style={styles.closeButton}
               onPress={() => {
-                swipeValue.value = withTiming(0, { duration: 300 });
+                swipeValue.value = withTiming(0, {
+                  duration: 300,
+                });
                 isOverlayOpen.current = false;
               }}
             >
@@ -819,8 +921,8 @@ export default function Index() {
           StyleSheet.absoluteFill,
           styles.sideOverlayContainer,
           animatedSideModalStyle,
+          { pointerEvents: "box-none" },
         ]}
-        pointerEvents="box-none"
       >
         {!reduceTransparency && (
           <BlurView
@@ -1012,7 +1114,10 @@ export default function Index() {
             )}
             <Pressable
               style={[styles.closeButton, { marginTop: 20 }]}
-              onPress={() => setIsBTModalVisible(false)}
+              onPress={() => {
+                bleManager.current?.stopDeviceScan();
+                setIsBTModalVisible(false);
+              }}
             >
               <Text style={styles.closeButtonText}>Cancel</Text>
             </Pressable>
@@ -1510,5 +1615,24 @@ const styles = StyleSheet.create({
     position: "absolute",
     borderRadius: 999,
     backgroundColor: "rgba(255, 255, 255, 0.8)",
+  },
+  glowTitle: {
+    fontSize: 22,
+    marginLeft: 12,
+    // Modern Text Glow (RN 0.83+)
+    // Cast to any because TS definitions for TextStyle are not yet updated for the shorthand
+    ...({ textShadow: "0px 0px 15px rgba(32, 138, 239, 0.9)" } as any),
+  },
+  visionText: {
+    fontFamily: "Montserrat-Bold",
+    color: "#fff",
+  },
+  iCalcText: {
+    fontFamily: "Cedarville-Cursive", // Or any cursive font you have loaded
+    color: "#fff",
+  },
+  logoNumberText: {
+    fontWeight: "bold",
+    color: "#000",
   },
 });
